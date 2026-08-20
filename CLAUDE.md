@@ -97,6 +97,28 @@ observed shape:
 - A 20-byte address must not go through the long-blob eliding path, or a decoded
   argument renders as `0x0000…0001 (10 bytes elided)`.
 
+**All chain-derived strings go through `untrusted()` before rendering.** This is
+a security boundary in `format.ts`, not formatting. Contract names, token
+symbols, function names, decoded string values, verified source lines and revert
+reasons are controlled by whoever deployed the contract, and this server exists
+to be pointed at contracts nobody trusts yet. A `revert()` string is fully
+attacker-chosen and is rendered at the very top of the output, so an unsanitised
+one can forge a `## heading` that reads as server-generated instruction.
+
+`untrusted()` collapses whitespace (removing the newlines needed to forge
+markdown structure), strips C0/C1 controls plus zero-width and bidi-override
+characters (trojan-source style hiding), and caps length with the truncation
+announced. The defence is deliberately structural — detecting injection
+semantically is whack-a-mole, whereas text that cannot contain a newline cannot
+start a new block. `sanitiseOrNull()` applies the same treatment inside
+`buildDigest`, so `structuredContent` is covered as well as the text.
+
+When adding a render site for any string that came from a simulation, route it
+through `untrusted()` with a length cap suited to the field. The adversarial
+tests in `tests/format.test.ts` ("untrusted chain data cannot escape its field")
+cover heading forgery, bidi characters, oversized payloads and — importantly —
+that ordinary revert strings survive unmangled.
+
 **Truncation is always announced.** `format.ts` caps trace frames, events, asset
 changes and state entries. Every cap emits a note saying what was dropped and
 which argument raises it. A silent cap reads to the model as "that was
