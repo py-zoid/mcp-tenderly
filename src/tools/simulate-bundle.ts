@@ -34,18 +34,15 @@ export function registerSimulateBundle(options: {
     {
       title: 'Simulate a sequence of EVM transactions',
       description:
-        'Simulate several transactions in order against shared state, so each one sees the effects of the ones before it. ' +
-        'This is the tool for multi-step flows that cannot be checked one transaction at a time: approve then swap, deploy then initialise, or reproducing an exploit sequence. ' +
-        'Every transaction gets its own outcome, gas figure and call trace, and the run reports which step in the sequence broke.',
+        'Simulate transactions in order against shared state, so each sees the effects of the ones before it — approve then swap, deploy then initialise, replaying an exploit. ' +
+        'Each gets its own outcome, gas and call trace, and the run reports which step broke.',
       inputSchema: {
         network: NetworkSchema,
         transactions: z
           .array(z.object(TransactionFieldsSchema))
           .min(1)
           .max(MAX_BUNDLE)
-          .describe(
-            `Transactions to run in order, sharing state. Between 1 and ${String(MAX_BUNDLE)} entries.`
-          ),
+          .describe(`Transactions to run in order, sharing state. Max ${String(MAX_BUNDLE)}.`),
         block_number: z
           .number()
           .int()
@@ -53,15 +50,11 @@ export function registerSimulateBundle(options: {
           .optional()
           .describe('Fork from this block. Omit to use the latest block.'),
         simulation_type: SimulationTypeSchema.optional(),
-        state_overrides: StateOverridesSchema.optional().describe(
-          'Account state overrides applied before the first transaction, keyed by address.'
-        ),
+        state_overrides: StateOverridesSchema.optional(),
         save: z
           .boolean()
           .optional()
-          .describe(
-            'Persist each simulation to the dashboard. Consumes free-tier quota per transaction.'
-          ),
+          .describe('Persist each simulation. Consumes free-tier quota per transaction.'),
         ...OutputControlSchema,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },

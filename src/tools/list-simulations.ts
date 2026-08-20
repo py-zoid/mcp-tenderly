@@ -21,17 +21,10 @@ export function registerListSimulations(options: {
     {
       title: 'List recent saved simulations',
       description:
-        'List the most recent simulations saved in the configured Tenderly project, newest first, one line each. ' +
-        'Use this to find the id of a simulation to inspect with tenderly_get_simulation when you do not have it to hand.',
+        'List recent saved simulations in the project, newest first, one line each — use it to find an id for tenderly_get_simulation.',
       inputSchema: {
-        page: z.number().int().positive().optional().describe('1-based page number. Default 1.'),
-        per_page: z
-          .number()
-          .int()
-          .positive()
-          .max(100)
-          .optional()
-          .describe('Results per page, up to 100. Default 20.'),
+        page: z.number().int().positive().optional().describe('1-based. Default 1.'),
+        per_page: z.number().int().positive().max(100).optional().describe('Max 100. Default 20.'),
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
     },
