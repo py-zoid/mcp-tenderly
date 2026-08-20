@@ -9,7 +9,7 @@
  */
 
 import { z } from 'zod';
-import { TenderlyApiError } from '../errors.js';
+import { InvalidArgumentError, TenderlyApiError } from '../errors.js';
 import type { Config } from '../config.js';
 import type { Logger } from '../logger.js';
 import {
@@ -19,6 +19,7 @@ import {
   SimulateBundleResponseSchema,
   SimulateResponseSchema,
   type SimulateResponse,
+  type SimulationMeta,
 } from './schemas.js';
 
 /** Per-account state override applied before execution. */
@@ -81,6 +82,11 @@ function toWireBody(params: SimulateParams, defaults: { save: boolean }): Record
   }
 
   return body;
+}
+
+/** Local helper: a string field that is present and not empty. */
+function isNonEmpty(value: string | null | undefined): value is string {
+  return value !== null && value !== undefined && value !== '';
 }
 
 /** Statuses worth a second attempt: rate limiting and server-side faults. */
@@ -338,6 +344,15 @@ export class TenderlyClient {
     return result.simulation_results ?? [];
   }
 
+  /**
+   * Fetches a saved simulation's metadata.
+   *
+   * Verified against the live API: this endpoint returns `{ simulation: {…} }`
+   * containing inputs, gas, status and `error_message` — and **no**
+   * `transaction_info`, so no call trace, no logs and no state diff. The trace
+   * exists only in the `POST /simulate` response that created it. Use
+   * `replaySimulation` to reconstruct one.
+   */
   async getSimulation(simulationId: string): Promise<SimulateResponse> {
     const result = await this.request({
       method: 'GET',
@@ -345,8 +360,8 @@ export class TenderlyClient {
       schema: GetSimulationResponseSchema,
     });
 
-    // This endpoint nests the transaction inside `simulation`, where `/simulate`
-    // returns it as a sibling. Normalise so downstream code sees one shape.
+    // `transaction` is accepted in either position purely for robustness; the
+    // live API populates neither on this endpoint.
     const nested = result.simulation?.transaction ?? null;
     return {
       transaction: result.transaction ?? nested,
@@ -354,6 +369,43 @@ export class TenderlyClient {
       contracts: result.contracts ?? null,
       generated_access_list: result.generated_access_list ?? null,
     };
+  }
+
+  /**
+   * Re-runs a saved simulation from its recorded inputs to obtain a full trace.
+   *
+   * Faithful rather than approximate: the metadata carries the block number, so
+   * the replay executes against the same forked state and reproduces the same
+   * outcome. Saved with `save: false` so inspecting a simulation does not
+   * consume another slot of free-tier stored-simulation quota.
+   *
+   * @throws InvalidArgumentError when the metadata lacks the fields a
+   * simulation needs, which is the case for records not created by `/simulate`.
+   */
+  async replaySimulation(meta: SimulationMeta): Promise<SimulateResponse> {
+    const networkId = meta.network_id;
+    const from = meta.from;
+    if (!isNonEmpty(networkId) || !isNonEmpty(from)) {
+      throw new InvalidArgumentError(
+        'This saved simulation does not record the network and sender needed to reproduce its trace.'
+      );
+    }
+
+    const gas = typeof meta.gas === 'number' ? meta.gas : Number(meta.gas ?? 0);
+    const value = meta.value === null || meta.value === undefined ? undefined : String(meta.value);
+
+    return this.simulate({
+      networkId,
+      from,
+      ...(isNonEmpty(meta.to) ? { to: meta.to } : {}),
+      ...(isNonEmpty(meta.input) ? { data: meta.input } : {}),
+      // A recorded gas of 0 means "no limit was set", not "no gas allowed".
+      ...(Number.isFinite(gas) && gas > 0 ? { gas } : {}),
+      ...(value !== undefined && value !== '0' ? { value } : {}),
+      ...(typeof meta.block_number === 'number' ? { blockNumber: meta.block_number } : {}),
+      simulationType: 'full',
+      save: false,
+    });
   }
 
   async listSimulations(
