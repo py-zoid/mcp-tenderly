@@ -70,6 +70,33 @@ a regression test covers it. Do not "simplify" it back into a spread.
 Virtual TestNets, Alerts and Actions are paid or OAuth-gated; adding them would
 break the server for the free-tier users it exists to serve.
 
+**`GET /simulations/{id}` returns metadata only.** Verified against the live
+API: the response is `{ simulation: {…} }` with inputs, gas, status and
+`error_message`, and **no** `transaction_info` — so no call trace, no logs, no
+state diff. The trace exists only in the `POST /simulate` response that created
+it. `tenderly_get_simulation` therefore fetches the metadata and then calls
+`client.replaySimulation()`, which rebuilds a `/simulate` call from the recorded
+inputs at the recorded block (`save: false`, so it costs no stored-simulation
+quota). The original metadata is kept for identity, so the reported id and
+dashboard link still point at the saved simulation rather than the replay. Do not
+"simplify" this back into a single GET — the trace will silently vanish.
+
+**Real payloads are messier than the documented schema.** Each of these was found
+by running against the live API, and each is covered by a test built from the
+observed shape:
+
+- Numeric fields mix decimal and hex, and zero arrives as bare `"0x"`, which
+  `BigInt()` throws on. Every numeric read goes through `toBigInt()`.
+- `gas` is the int64 maximum when the caller set no limit, and `0` on a saved
+  record. `realGas()` drops the sentinel; `realGasLimit()` also drops zero, while
+  leaving zero meaningful for gas _used_.
+- Absent strings arrive as missing, `null`, **or** `""`, sometimes for the same
+  field across endpoints. `??` does not skip `""`, which is why `present()` and
+  `firstPresent()` exist — an empty `method` once rendered as a bare `- Method:`
+  line, and an empty `call_type` as a blank op in the trace.
+- A 20-byte address must not go through the long-blob eliding path, or a decoded
+  argument renders as `0x0000…0001 (10 bytes elided)`.
+
 **Truncation is always announced.** `format.ts` caps trace frames, events, asset
 changes and state entries. Every cap emits a note saying what was dropped and
 which argument raises it. A silent cap reads to the model as "that was
@@ -88,4 +115,6 @@ set -a && . ./.env && set +a && node dist/index.js
 
 When a real response does not match `schemas.ts`, the fix is to relax the schema
 and add the observed shape to a fixture in `tests/helpers.ts` — not to tighten
-the schema around one observation.
+the schema around one observation. `realWorldUsdcResponse()` in that file is
+captured from an actual mainnet response, and exists precisely because the
+hand-written fixtures were too clean to expose the quirks listed above.

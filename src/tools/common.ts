@@ -123,6 +123,12 @@ export const OutputControlSchema = {
     .max(64)
     .optional()
     .describe('Cap on call-trace nesting depth. Default 12.'),
+  include_opcode_frames: z
+    .boolean()
+    .optional()
+    .describe(
+      'Show SLOAD, SSTORE and LOG frames in the call trace. Default false — a full trace interleaves hundreds of these with the actual calls, and they push the frames that explain a revert out of the output.'
+    ),
   include_raw_response: z
     .boolean()
     .optional()
@@ -138,6 +144,7 @@ export interface OutputControlArgs {
   include_asset_changes?: boolean | undefined;
   max_trace_nodes?: number | undefined;
   max_trace_depth?: number | undefined;
+  include_opcode_frames?: boolean | undefined;
   include_raw_response?: boolean | undefined;
 }
 
@@ -147,6 +154,7 @@ export function toFormatOptions(args: OutputControlArgs): {
   includeAssetChanges?: boolean | undefined;
   maxTraceNodes?: number | undefined;
   maxTraceDepth?: number | undefined;
+  includeOpcodeFrames?: boolean | undefined;
 } {
   return {
     includeCallTrace: args.include_call_trace,
@@ -154,6 +162,7 @@ export function toFormatOptions(args: OutputControlArgs): {
     includeAssetChanges: args.include_asset_changes,
     maxTraceNodes: args.max_trace_nodes,
     maxTraceDepth: args.max_trace_depth,
+    includeOpcodeFrames: args.include_opcode_frames,
   };
 }
 

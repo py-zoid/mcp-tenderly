@@ -35,6 +35,8 @@ export interface FormatOptions {
   maxTraceNodes?: number | undefined;
   maxTraceDepth?: number | undefined;
   maxLogs?: number | undefined;
+  /** Show SLOAD/SSTORE/LOG frames, which are hidden by default as noise. */
+  includeOpcodeFrames?: boolean | undefined;
 }
 
 /** Every knob decided — no `undefined` survives past `withDefaults`. */
@@ -45,6 +47,7 @@ interface ResolvedFormatOptions {
   maxTraceNodes: number;
   maxTraceDepth: number;
   maxLogs: number;
+  includeOpcodeFrames: boolean;
 }
 
 const DEFAULTS = {
@@ -54,6 +57,7 @@ const DEFAULTS = {
   maxTraceNodes: 200,
   maxTraceDepth: 12,
   maxLogs: 50,
+  includeOpcodeFrames: false,
 } satisfies ResolvedFormatOptions;
 
 /**
@@ -72,6 +76,7 @@ function withDefaults(options: FormatOptions): ResolvedFormatOptions {
     maxTraceNodes: options.maxTraceNodes ?? DEFAULTS.maxTraceNodes,
     maxTraceDepth: options.maxTraceDepth ?? DEFAULTS.maxTraceDepth,
     maxLogs: options.maxLogs ?? DEFAULTS.maxLogs,
+    includeOpcodeFrames: options.includeOpcodeFrames ?? DEFAULTS.includeOpcodeFrames,
   };
 }
 
@@ -91,10 +96,68 @@ function present(value: string | null | undefined): value is string {
   return value !== null && value !== undefined && value !== '';
 }
 
-function num(value: string | number | null | undefined): number | undefined {
+/**
+ * Parses a Tenderly numeric field, which may be decimal or hex.
+ *
+ * The API is not consistent about this: `value` comes back as `"0x"` for a
+ * zero-value call while `gas_used` is a decimal number, and both appear on the
+ * same object. `BigInt("0x")` throws, so bare `0x` is normalised to zero.
+ */
+function toBigInt(value: string | number | null | undefined): bigint | undefined {
   if (value === null || value === undefined) return undefined;
-  const n = typeof value === 'number' ? value : Number(value);
+  if (typeof value === 'number')
+    return Number.isFinite(value) ? BigInt(Math.trunc(value)) : undefined;
+  const raw = value.trim();
+  if (raw === '' || raw.toLowerCase() === '0x') return 0n;
+  try {
+    return BigInt(raw);
+  } catch {
+    return undefined;
+  }
+}
+
+/** First argument that is a non-empty string, else null. */
+function firstPresent(...values: (string | null | undefined)[]): string | null {
+  for (const value of values) {
+    if (present(value)) return value;
+  }
+  return null;
+}
+
+function num(value: string | number | null | undefined): number | undefined {
+  const big = toBigInt(value);
+  if (big === undefined) return undefined;
+  const n = Number(big);
   return Number.isFinite(n) ? n : undefined;
+}
+
+/** True when an amount is absent or parses to zero, in any of its spellings. */
+function isZeroAmount(value: string | number | null | undefined): boolean {
+  if (value === null || value === undefined) return true;
+  return toBigInt(value) === 0n;
+}
+
+/**
+ * Tenderly reports the int64 maximum as the gas limit when the caller did not
+ * set one, and as `gas` on proxy fallback frames. Rendering that as a real
+ * limit ("30,728 of 9,223,372,036,854,776,000") is worse than saying nothing,
+ * so anything above any plausible block gas limit is treated as absent.
+ */
+const GAS_SENTINEL_FLOOR = 1_000_000_000;
+
+function realGas(value: string | number | null | undefined): number | undefined {
+  const n = num(value);
+  return n === undefined || n >= GAS_SENTINEL_FLOOR ? undefined : n;
+}
+
+/**
+ * A gas *limit* of zero means "none was recorded", so it must be suppressed
+ * rather than rendered as "of 0 limit". Zero is left meaningful for gas *used*,
+ * where a frame genuinely can consume none.
+ */
+function realGasLimit(value: string | number | null | undefined): number | undefined {
+  const n = realGas(value);
+  return n === undefined || n <= 0 ? undefined : n;
 }
 
 function withThousands(value: string | number | null | undefined): string {
@@ -104,13 +167,8 @@ function withThousands(value: string | number | null | undefined): string {
 
 /** Formats a wei amount as a decimal string, trimming trailing zeros. */
 export function formatUnits(raw: string | number | null | undefined, decimals = 18): string {
-  if (raw === null || raw === undefined) return '0';
-  let value: bigint;
-  try {
-    value = BigInt(typeof raw === 'number' ? Math.trunc(raw) : raw.trim());
-  } catch {
-    return String(raw);
-  }
+  const value = toBigInt(raw);
+  if (value === undefined) return String(raw);
   if (decimals <= 0) return value.toString();
 
   const negative = value < 0n;
@@ -138,6 +196,10 @@ function shortAddress(address: string | null | undefined): string {
 export function renderSolValue(value: unknown, depth = 0): string {
   if (value === null || value === undefined) return 'null';
   if (typeof value === 'string') {
+    // A 20-byte address is the most common decoded argument and the one most
+    // often compared by eye, so it gets the compact form rather than the
+    // byte-count note that suits an opaque blob.
+    if (/^0x[0-9a-fA-F]{40}$/.test(value)) return shortAddress(value);
     return value.startsWith('0x') && value.length > 24 ? shortHex(value) : value;
   }
   if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
@@ -199,6 +261,45 @@ function labelFor(address: string | null | undefined, labels: Map<string, string
 // call trace
 // ---------------------------------------------------------------------------
 
+/**
+ * Frames that are storage or log opcodes rather than calls.
+ *
+ * A `simulation_type: "full"` trace interleaves these with real calls — a
+ * plain USDC transfer produces a dozen SLOADs against four actual calls, and a
+ * DeFi transaction produces hundreds. Left in, they consume the node budget and
+ * push the frames that explain a revert out of the output entirely. JUMPDEST is
+ * deliberately *not* here: it marks an internal Solidity function call, which
+ * is exactly what you want when tracing a revert through a library.
+ */
+const OPCODE_FRAMES = new Set(['SLOAD', 'SSTORE', 'LOG0', 'LOG1', 'LOG2', 'LOG3', 'LOG4']);
+
+function isOpcodeFrame(node: CallTraceNode): boolean {
+  const op = node.call_type ?? node.caller_op;
+  return present(op) && OPCODE_FRAMES.has(op);
+}
+
+/**
+ * Drops opcode frames, lifting any children into the parent's position so a
+ * pruned frame never takes a real call down with it.
+ */
+function pruneOpcodeFrames(node: CallTraceNode): { node: CallTraceNode; pruned: number } {
+  let pruned = 0;
+  const keep: CallTraceNode[] = [];
+
+  for (const child of node.calls ?? []) {
+    const result = pruneOpcodeFrames(child);
+    pruned += result.pruned;
+    if (isOpcodeFrame(child)) {
+      pruned += 1;
+      keep.push(...(result.node.calls ?? []));
+    } else {
+      keep.push(result.node);
+    }
+  }
+
+  return { node: { ...node, calls: keep.length > 0 ? keep : null }, pruned };
+}
+
 function countNodes(node: CallTraceNode | null | undefined): number {
   if (node === null || node === undefined) return 0;
   let total = 1;
@@ -216,15 +317,26 @@ function countNodes(node: CallTraceNode | null | undefined): number {
 export function formatCallTrace(
   root: CallTraceNode | null | undefined,
   labels: Map<string, string>,
-  options: { maxNodes: number; maxDepth: number }
+  options: { maxNodes: number; maxDepth: number; includeOpcodeFrames?: boolean | undefined }
 ): { text: string; notes: string[] } {
   if (root === null || root === undefined) {
     return { text: '(no call trace in this response)', notes: [] };
   }
 
-  const total = countNodes(root);
-  const lines: string[] = [];
   const notes: string[] = [];
+  let tree = root;
+  if (options.includeOpcodeFrames !== true) {
+    const { node, pruned } = pruneOpcodeFrames(root);
+    tree = node;
+    if (pruned > 0) {
+      notes.push(
+        `${String(pruned)} storage/log opcode frame(s) hidden. Pass include_opcode_frames=true to show SLOAD, SSTORE and LOG frames.`
+      );
+    }
+  }
+
+  const total = countNodes(tree);
+  const lines: string[] = [];
   let rendered = 0;
   let depthTruncations = 0;
 
@@ -233,7 +345,7 @@ export function formatCallTrace(
     rendered++;
 
     const connector = depth === 0 ? '' : isLast ? '└─ ' : '├─ ';
-    const op = node.call_type ?? node.caller_op ?? 'CALL';
+    const op = firstPresent(node.call_type, node.caller_op) ?? 'CALL';
     const target = labelFor(node.to, labels);
     const fn = node.function_name;
     const args = renderArgs(node.decoded_input);
@@ -247,12 +359,9 @@ export function formatCallTrace(
         : target;
 
     const bits: string[] = [];
-    const gasUsed = num(node.gas_used);
+    const gasUsed = realGas(node.gas_used);
     if (gasUsed !== undefined) bits.push(`gas ${gasUsed.toLocaleString('en-US')}`);
-    const value = node.value;
-    if (value !== null && value !== undefined && String(value) !== '0') {
-      bits.push(`value ${formatUnits(value)}`);
-    }
+    if (!isZeroAmount(node.value)) bits.push(`value ${formatUnits(node.value)}`);
 
     const failed = present(node.error);
     const marker = failed ? '✗ ' : '';
@@ -277,7 +386,7 @@ export function formatCallTrace(
     });
   };
 
-  walk(root, '', true, 0);
+  walk(tree, '', true, 0);
 
   if (rendered < total - depthTruncations) {
     notes.push(
@@ -464,8 +573,8 @@ export function buildDigest(response: SimulateResponse, config: Config): Simulat
     network_id: tx?.network_id ?? sim?.network_id ?? null,
     block_number: tx?.block_number ?? sim?.block_number ?? null,
     gas_used: num(tx?.gas_used ?? sim?.gas_used ?? info?.gas_used) ?? null,
-    gas_limit: num(tx?.gas ?? sim?.gas) ?? null,
-    method: tx?.method ?? sim?.method ?? info?.method ?? null,
+    gas_limit: realGasLimit(tx?.gas ?? sim?.gas) ?? null,
+    method: firstPresent(tx?.method, sim?.method, info?.method),
     error_message: errorMessage === '' ? null : errorMessage,
     revert_reason: revertReason,
     event_count: (info?.logs ?? []).length,
@@ -512,7 +621,7 @@ export function formatSimulation(
     );
   }
   const value = tx?.value ?? sim?.value;
-  if (value !== null && value !== undefined && String(value) !== '0') {
+  if (!isZeroAmount(value)) {
     overview.push(`- Value: ${formatUnits(value)} ${nativeSymbol(networkId)}`);
   }
   if (digest.simulation_id !== null) overview.push(`- Simulation ID: ${digest.simulation_id}`);
@@ -556,6 +665,7 @@ export function formatSimulation(
     const trace = formatCallTrace(info?.call_trace ?? null, labels, {
       maxNodes: opts.maxTraceNodes,
       maxDepth: opts.maxTraceDepth,
+      includeOpcodeFrames: opts.includeOpcodeFrames,
     });
     sections.push(['## Call trace', '```', trace.text, '```', ...trace.notes].join('\n'));
   }
@@ -570,7 +680,8 @@ export function formatSimulation(
   // rather than emitting a confident-looking empty digest.
   if (tx === null || tx === undefined) {
     sections.push(
-      '## Note\nThe response contained no transaction detail. Re-run with include_raw_response=true to inspect the payload Tenderly returned.'
+      '## Note\nThis response carried no execution detail, so there is no call trace, no events and no state diff — only the fields above. ' +
+        'For a saved simulation that is expected: Tenderly stores metadata without the trace. Otherwise, re-run with include_raw_response=true to inspect what was returned.'
     );
   }
 

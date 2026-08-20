@@ -8,7 +8,7 @@ import {
   renderSolValue,
 } from '../src/tenderly/format.js';
 import type { CallTraceNode } from '../src/tenderly/schemas.js';
-import { revertResponse, successResponse, testConfig } from './helpers.js';
+import { realWorldUsdcResponse, revertResponse, successResponse, testConfig } from './helpers.js';
 
 describe('formatUnits', () => {
   it('converts wei to a trimmed decimal string', () => {
@@ -217,10 +217,13 @@ describe('formatSimulation', () => {
     );
   });
 
-  it('flags a response with no transaction detail instead of rendering an empty digest', () => {
+  it('flags a response with no execution detail instead of rendering an empty digest', () => {
     const text = formatSimulation({ transaction: null, simulation: { id: 'x' } }, testConfig);
-    expect(text).toContain('no transaction detail');
+    // Asserted on behaviour rather than prose: a note must be raised, and it
+    // must point at the escape hatch for inspecting the payload.
+    expect(text).toContain('## Note');
     expect(text).toContain('include_raw_response');
+    expect(text).toContain('no call trace');
   });
 
   it('reports an undecoded event by its topic rather than dropping it', () => {
@@ -241,5 +244,98 @@ describe('formatSimulation', () => {
     const text = formatSimulation(response, testConfig);
     expect(text).toContain('<undecoded>');
     expect(text).toContain('0xdeadbeef');
+  });
+});
+
+// Every case below reproduces something the stub fixtures could not: these are
+// the shapes the live mainnet API actually returned.
+describe('real-world payload quirks', () => {
+  it('treats a bare "0x" amount as zero rather than printing it verbatim', () => {
+    // BigInt('0x') throws, which previously surfaced as "Value: 0x ETH".
+    expect(formatUnits('0x')).toBe('0');
+    expect(formatUnits('0x0')).toBe('0');
+    const text = formatSimulation(realWorldUsdcResponse(), testConfig);
+    expect(text).not.toContain('0x ETH');
+    expect(text).not.toContain('- Value:');
+  });
+
+  it('parses hex amounts, which Tenderly mixes with decimal ones', () => {
+    expect(formatUnits('0xf4240', 6)).toBe('1');
+    expect(formatUnits('0xde0b6b3a7640000')).toBe('1');
+  });
+
+  it('suppresses the int64-max gas sentinel instead of calling it a limit', () => {
+    const text = formatSimulation(realWorldUsdcResponse(), testConfig);
+    expect(text).toContain('Gas used: 44,920');
+    expect(text).not.toContain('9,223,372,036,854');
+    expect(text).not.toContain('limit');
+    expect(buildDigest(realWorldUsdcResponse(), testConfig).gas_limit).toBeNull();
+  });
+
+  it('omits the method line when the API returns an empty string', () => {
+    expect(buildDigest(realWorldUsdcResponse(), testConfig).method).toBeNull();
+    expect(formatSimulation(realWorldUsdcResponse(), testConfig)).not.toContain('- Method:');
+  });
+
+  it('renders a decoded address compactly, with no byte-count note', () => {
+    const text = formatSimulation(realWorldUsdcResponse(), testConfig);
+    expect(text).toContain('0x000000…00dEaD');
+    // The byte-count note belongs on opaque blobs, not on 20-byte addresses.
+    expect(text).not.toContain('bytes elided');
+  });
+
+  it('hides storage and log opcode frames but keeps internal function frames', () => {
+    const text = formatSimulation(realWorldUsdcResponse(), testConfig);
+    // Scoped to the fenced trace block: the explanatory note names these
+    // opcodes on purpose, so asserting over the whole document is meaningless.
+    const traceBlock = /```\n([\s\S]*?)\n```/.exec(text)?.[1] ?? '';
+    expect(traceBlock).not.toBe('');
+    expect(traceBlock).not.toContain('SLOAD');
+    expect(traceBlock).not.toContain('SSTORE');
+    expect(traceBlock).not.toContain('LOG3');
+    // JUMPDEST marks an internal Solidity call — exactly what a revert trace needs.
+    expect(traceBlock).toContain('_transfer');
+    expect(traceBlock).toContain('DELEGATECALL');
+  });
+
+  it('reports how many opcode frames it hid', () => {
+    const text = formatSimulation(realWorldUsdcResponse(), testConfig);
+    expect(text).toMatch(/5 storage\/log opcode frame\(s\) hidden/);
+    expect(text).toContain('include_opcode_frames');
+  });
+
+  it('shows opcode frames when explicitly asked', () => {
+    const trace = realWorldUsdcResponse().transaction?.transaction_info?.call_trace;
+    const { text } = formatCallTrace(trace, new Map(), {
+      maxNodes: 100,
+      maxDepth: 10,
+      includeOpcodeFrames: true,
+    });
+    expect(text).toContain('SLOAD');
+    expect(text).toContain('SSTORE');
+  });
+
+  // A pruned frame must not take a real call down with it.
+  it('lifts the children of a pruned frame into its parent', () => {
+    const trace: CallTraceNode = {
+      call_type: 'CALL',
+      function_name: 'outer',
+      calls: [
+        {
+          call_type: 'SLOAD',
+          calls: [{ call_type: 'STATICCALL', function_name: 'survivor', calls: null }],
+        },
+      ],
+    };
+    const { text } = formatCallTrace(trace, new Map(), { maxNodes: 50, maxDepth: 10 });
+    expect(text).not.toContain('SLOAD');
+    expect(text).toContain('survivor');
+  });
+
+  it('does not print a value line for a zero-value frame in the trace', () => {
+    const trace = realWorldUsdcResponse().transaction?.transaction_info?.call_trace;
+    const { text } = formatCallTrace(trace, new Map(), { maxNodes: 50, maxDepth: 10 });
+    expect(text).not.toContain('value 0x');
+    expect(text).not.toContain('value 0');
   });
 });

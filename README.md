@@ -125,9 +125,18 @@ or replaying an exploit sequence. It reports which step in the sequence broke.
 
 ### `tenderly_get_simulation`
 
-Fetch a saved simulation by id and render its trace. Use it to go deeper on a
-trace that was truncated, to pull the state diff that is omitted by default, or
-to inspect a simulation created earlier or from the Tenderly UI.
+Look up a saved simulation by id and render its outcome and full call trace. Use
+it to go deeper on a trace that was truncated, to pull the state diff that is
+omitted by default, or to inspect a simulation created earlier or from the
+Tenderly UI.
+
+One thing worth knowing, because it shapes how this tool behaves: Tenderly's
+saved-simulation record stores **only metadata** — inputs, gas, status, error
+message. The call trace is not kept. So the trace is reproduced by replaying the
+recorded inputs at the recorded block, which is faithful (same fork, same
+outcome) but costs one simulation against your rate limit. The replay is not
+saved, so it does not consume stored-simulation quota. Pass
+`reconstruct_trace: false` for a cheap metadata-only lookup.
 
 ### `tenderly_list_simulations`
 
@@ -143,9 +152,17 @@ typical response affordable:
 | `include_call_trace`    | `true`  | The main debugging artefact.                     |
 | `include_asset_changes` | `true`  | Token transfers and native balance deltas.       |
 | `include_state_diff`    | `false` | Off by default — by far the bulkiest section.    |
+| `include_opcode_frames` | `false` | Show `SLOAD`/`SSTORE`/`LOG` frames. See below.   |
 | `max_trace_nodes`       | `200`   | Truncation is always reported in the output.     |
 | `max_trace_depth`       | `12`    | Deep proxy chains hit this before the node cap.  |
 | `include_raw_response`  | `false` | Appends the untouched Tenderly JSON. Very large. |
+
+A full Tenderly trace interleaves storage and log opcodes with real calls — a
+plain USDC transfer yields a dozen `SLOAD`s around four actual calls, and a DeFi
+transaction yields hundreds. Left in, they consume the frame budget and push the
+calls that explain a revert out of the output, so they are hidden by default and
+the count is reported. Internal Solidity function frames (`JUMPDEST`) are kept:
+those are what let you follow a revert through a library or proxy.
 
 ## Free-tier notes
 

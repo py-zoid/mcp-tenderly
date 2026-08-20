@@ -78,7 +78,7 @@ export function remediationFor(err: unknown): string | undefined {
     case 403:
       return 'Check TENDERLY_API_KEY. It must be an access token from Account Settings -> Access Tokens, and the token must belong to an account with access to TENDERLY_ACCOUNT_SLUG.';
     case 404:
-      return 'Check TENDERLY_ACCOUNT_SLUG and TENDERLY_PROJECT_SLUG. Both are the slugs from your dashboard URL (dashboard.tenderly.co/<account>/<project>), not display names.';
+      return 'Either the requested resource does not exist in this project, or the project itself is wrong. Check the simulation id first, then TENDERLY_ACCOUNT_SLUG and TENDERLY_PROJECT_SLUG — both are the slugs from your dashboard URL (dashboard.tenderly.co/<account>/<project>), not display names.';
     case 429:
       return 'Tenderly rate-limited this request. Free-tier projects have a monthly simulation quota and a per-minute rate limit; wait and retry, or pass save=false to avoid consuming stored-simulation quota.';
     default:

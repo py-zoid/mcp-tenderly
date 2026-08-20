@@ -248,3 +248,78 @@ describe('TenderlyClient.listSimulations', () => {
     expect(calls[0]?.url).toContain('perPage=5');
   });
 });
+
+describe('TenderlyClient.replaySimulation', () => {
+  it('rebuilds a simulate call from saved metadata at the recorded block', async () => {
+    const { client, calls } = makeClient([{ status: 200, body: successResponse() }]);
+
+    await client.replaySimulation({
+      id: 'sim-1',
+      network_id: '1',
+      from: '0x1111111111111111111111111111111111111111',
+      to: '0x2222222222222222222222222222222222222222',
+      input: '0xa9059cbb',
+      block_number: 25794860,
+      // A recorded gas of 0 means "no limit was set", not "no gas allowed".
+      gas: 0,
+      value: '0',
+    });
+
+    expect(calls[0]?.url).toContain('/simulate');
+    const body = bodyOf(calls[0]);
+    expect(body.network_id).toBe('1');
+    expect(body.input).toBe('0xa9059cbb');
+    expect(body.block_number).toBe(25794860);
+    expect('gas' in body).toBe(false);
+    expect('value' in body).toBe(false);
+    // Inspecting a simulation must not consume another stored-simulation slot.
+    expect(body.save).toBe(false);
+    expect(body.simulation_type).toBe('full');
+  });
+
+  it('forwards a non-zero recorded gas and value', async () => {
+    const { client, calls } = makeClient([{ status: 200, body: successResponse() }]);
+    await client.replaySimulation({
+      network_id: '8453',
+      from: '0x1111111111111111111111111111111111111111',
+      gas: 500000,
+      value: '1000000000000000000',
+    });
+    const body = bodyOf(calls[0]);
+    expect(body.gas).toBe(500000);
+    expect(body.value).toBe('1000000000000000000');
+  });
+
+  it('refuses metadata that lacks the fields a simulation needs', async () => {
+    const { client, calls } = makeClient([{ status: 200, body: successResponse() }]);
+    await expect(client.replaySimulation({ id: 'sim-1' })).rejects.toThrow(/network and sender/);
+    // Nothing should have been sent.
+    expect(calls).toHaveLength(0);
+  });
+});
+
+describe('TenderlyClient.getSimulation shape', () => {
+  // Verified against the live API: this endpoint returns metadata only.
+  it('returns metadata with a null transaction when Tenderly sends no trace', async () => {
+    const { client } = makeClient([
+      {
+        status: 200,
+        body: {
+          simulation: {
+            id: 'sim-meta-only',
+            status: false,
+            network_id: '1',
+            method: 'transfer',
+            gas_used: 36073,
+            error_message: 'ERC20: transfer amount exceeds balance',
+          },
+        },
+      },
+    ]);
+
+    const result = await client.getSimulation('sim-meta-only');
+    expect(result.simulation?.method).toBe('transfer');
+    expect(result.simulation?.error_message).toBe('ERC20: transfer amount exceeds balance');
+    expect(result.transaction).toBeNull();
+  });
+});
