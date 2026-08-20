@@ -136,7 +136,8 @@ describe('formatCallTrace', () => {
     }
     const { text, notes } = formatCallTrace(deep, labels, { maxNodes: 500, maxDepth: 3 });
     expect(text).toContain('below depth limit');
-    expect(notes.join(' ')).toMatch(/omitted below depth 3/);
+    expect(notes.join(' ')).toMatch(/below depth 3/);
+    expect(notes.join(' ')).toContain('max_trace_depth');
   });
 
   it('falls back to the selector when a contract is unverified', () => {
@@ -300,7 +301,7 @@ describe('real-world payload quirks', () => {
 
   it('reports how many opcode frames it hid', () => {
     const text = formatSimulation(realWorldUsdcResponse(), testConfig);
-    expect(text).toMatch(/5 storage\/log opcode frame\(s\) hidden/);
+    expect(text).toMatch(/5 opcode frames hidden/);
     expect(text).toContain('include_opcode_frames');
   });
 
@@ -470,5 +471,95 @@ describe('untrusted chain data cannot escape its field', () => {
     }
     const text = formatSimulation(response, testConfig);
     expect(text).toContain('require(balance >= amount, "insufficient");');
+  });
+});
+
+// Regression: these three sections capped their output with no note at all,
+// which reads to a model as "that was everything" — the exact failure the
+// announce-every-cap rule exists to prevent.
+describe('previously silent caps now announce', () => {
+  it('announces dropped source-mapped stack frames', () => {
+    const response = revertResponse();
+    const info = response.transaction?.transaction_info;
+    if (info) {
+      info.stack_trace = Array.from({ length: 35 }, (_, i) => ({
+        name: `Frame${String(i)}.sol`,
+        line: i,
+        op: 'JUMP',
+      }));
+    }
+    const text = formatSimulation(response, testConfig);
+    expect(text).toMatch(/15 more frame\(s\) not shown/);
+  });
+
+  it('announces dropped native balance changes', () => {
+    const response = successResponse();
+    const info = response.transaction?.transaction_info;
+    if (info) {
+      info.balance_diff = Array.from({ length: 30 }, (_, i) => ({
+        address: `0x${String(i).padStart(40, '0')}`,
+        original: '0',
+        dirty: '1000',
+      }));
+    }
+    const text = formatSimulation(response, testConfig);
+    expect(text).toMatch(/10 more address\(es\) not shown/);
+  });
+
+  it('announces dropped console.log lines', () => {
+    const response = successResponse();
+    const info = response.transaction?.transaction_info;
+    if (info) {
+      info.console_logs = Array.from({ length: 55 }, (_, i) => ({
+        decoded_input: [{ soltype: { name: 'x' }, value: String(i) }],
+      }));
+    }
+    const text = formatSimulation(response, testConfig);
+    expect(text).toMatch(/15 more line\(s\) not shown/);
+  });
+
+  it('drops a revert reason that merely repeats the error message', () => {
+    const response = revertResponse();
+    if (response.transaction)
+      response.transaction.error_message = 'ERC20: transfer amount exceeds balance';
+    const text = formatSimulation(response, testConfig);
+    expect(text).toContain('- Error: ERC20: transfer amount exceeds balance');
+    expect(text).not.toContain('- Revert reason:');
+  });
+
+  it('keeps a revert reason that adds information', () => {
+    const response = revertResponse();
+    if (response.transaction) response.transaction.error_message = 'execution reverted';
+    const text = formatSimulation(response, testConfig);
+    expect(text).toContain('- Revert reason: ERC20: transfer amount exceeds balance');
+  });
+
+  it('omits the contract label on an internal frame in the same contract', () => {
+    const trace: CallTraceNode = {
+      call_type: 'CALL',
+      to: '0xAAAA000000000000000000000000000000000000',
+      function_name: 'outer',
+      calls: [
+        // Same contract: label should not repeat.
+        {
+          call_type: 'JUMPDEST',
+          to: '0xAAAA000000000000000000000000000000000000',
+          function_name: 'inner',
+          calls: null,
+        },
+        // Different contract: label must appear.
+        {
+          call_type: 'CALL',
+          to: '0xBBBB000000000000000000000000000000000000',
+          function_name: 'other',
+          calls: null,
+        },
+      ],
+    };
+    const { text } = formatCallTrace(trace, new Map(), { maxNodes: 50, maxDepth: 10 });
+    expect(text).toContain('JUMPDEST inner()');
+    expect(text).toContain('0xBBBB00…000000.other()');
+    // The root still carries its own label.
+    expect(text).toContain('0xAAAA00…000000.outer()');
   });
 });

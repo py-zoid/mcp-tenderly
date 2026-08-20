@@ -80,6 +80,34 @@ function withDefaults(options: FormatOptions): ResolvedFormatOptions {
   };
 }
 
+/**
+ * Caps on sections that have no tool argument to raise them.
+ *
+ * Named rather than inline because every one of them must be *announced* when
+ * it bites — three of these were previously silent, which is the failure the
+ * "truncation is always announced" rule exists to prevent: the model reads a
+ * truncated list as a complete one.
+ */
+const CAPS = {
+  stackFrames: 20,
+  assetChanges: 40,
+  balanceChanges: 20,
+  stateEntries: 30,
+  consoleLogs: 40,
+} as const;
+
+/**
+ * The omission note for a capped section, or nothing when nothing was dropped.
+ *
+ * Deliberately does not name an argument: unlike the call-trace caps, these
+ * sections have no knob to raise, and pointing at a lever that does not exist
+ * is worse than stating the limit plainly.
+ */
+function omitted(total: number, shown: number, unit: string): string | undefined {
+  if (total <= shown) return undefined;
+  return `… ${String(total - shown)} more ${unit} not shown (limit ${String(shown)}).`;
+}
+
 // ---------------------------------------------------------------------------
 // primitives
 // ---------------------------------------------------------------------------
@@ -387,9 +415,7 @@ export function formatCallTrace(
     const { node, pruned } = pruneOpcodeFrames(root);
     tree = node;
     if (pruned > 0) {
-      notes.push(
-        `${String(pruned)} storage/log opcode frame(s) hidden. Pass include_opcode_frames=true to show SLOAD, SSTORE and LOG frames.`
-      );
+      notes.push(`(${String(pruned)} opcode frames hidden; include_opcode_frames=true shows them)`);
     }
   }
 
@@ -398,22 +424,35 @@ export function formatCallTrace(
   let rendered = 0;
   let depthTruncations = 0;
 
-  const walk = (node: CallTraceNode, prefix: string, isLast: boolean, depth: number): void => {
+  const walk = (
+    node: CallTraceNode,
+    prefix: string,
+    isLast: boolean,
+    depth: number,
+    parentTo?: string
+  ): void => {
     if (rendered >= options.maxNodes) return;
     rendered++;
 
     const connector = depth === 0 ? '' : isLast ? '└─ ' : '├─ ';
     const op = firstPresent(node.call_type, node.caller_op) ?? 'CALL';
-    const target = labelFor(node.to, labels);
+    // An internal frame stays inside its caller's contract, so re-printing that
+    // contract's label on every one is noise — on a real proxy it repeats the
+    // same 40 characters for most of the trace. The address is always visible
+    // one ancestor up.
+    const sameContract =
+      present(node.to) && present(parentTo) && node.to.toLowerCase() === parentTo.toLowerCase();
+    const target = sameContract ? '' : labelFor(node.to, labels);
+    const dot = target === '' ? '' : '.';
     const fn = node.function_name;
     const args = renderArgs(node.decoded_input);
 
     const callee = present(fn)
-      ? `${target}.${untrusted(fn, 64)}(${args})`
+      ? `${target}${dot}${untrusted(fn, 64)}(${args})`
       : // Unverified contract: the selector is all we have, and it is still
         // enough for a human to look up in 4byte.directory.
         present(node.input) && node.input.length >= 10
-        ? `${target}.<${node.input.slice(0, 10)}>`
+        ? `${target}${dot}<${node.input.slice(0, 10)}>`
         : target;
 
     const bits: string[] = [];
@@ -442,7 +481,7 @@ export function formatCallTrace(
 
     const childPrefix = depth === 0 ? '' : prefix + (isLast ? '   ' : '│  ');
     children.forEach((child, index) => {
-      walk(child, childPrefix, index === children.length - 1, depth + 1);
+      walk(child, childPrefix, index === children.length - 1, depth + 1, node.to ?? undefined);
     });
   };
 
@@ -450,12 +489,12 @@ export function formatCallTrace(
 
   if (rendered < total - depthTruncations) {
     notes.push(
-      `Call trace truncated: showed ${String(rendered)} of ${String(total)} frames (node limit ${String(options.maxNodes)}). Raise max_trace_nodes to see more.`
+      `(showed ${String(rendered)} of ${String(total)} frames; raise max_trace_nodes for more)`
     );
   }
   if (depthTruncations > 0) {
     notes.push(
-      `${String(depthTruncations)} frame(s) omitted below depth ${String(options.maxDepth)}. Raise max_trace_depth to see more.`
+      `(${String(depthTruncations)} frames below depth ${String(options.maxDepth)} omitted; raise max_trace_depth)`
     );
   }
 
@@ -489,11 +528,8 @@ function formatLogs(
       out.push(`${String(index + 1)}. <undecoded> topic0=${topic0} — from ${emitter}`);
     }
   }
-  if (all.length > maxLogs) {
-    out.push(
-      `… ${String(all.length - maxLogs)} more event(s) not shown (limit ${String(maxLogs)}).`
-    );
-  }
+  const eventsNote = omitted(all.length, maxLogs, 'event(s)');
+  if (eventsNote !== undefined) out.push(eventsNote);
   return out;
 }
 
@@ -502,7 +538,7 @@ function formatStackTrace(frames: StackFrame[] | null | undefined): string[] {
   if (all.length === 0) return [];
 
   const out: string[] = ['## Source-mapped revert trace'];
-  for (const [index, frame] of all.slice(0, 20).entries()) {
+  for (const [index, frame] of all.slice(0, CAPS.stackFrames).entries()) {
     const where = untrusted(present(frame.name) ? frame.name : (frame.contract ?? 'unknown'), 64);
     const line = frame.line !== null && frame.line !== undefined ? `:${String(frame.line)}` : '';
     const code = frame.code;
@@ -516,6 +552,8 @@ function formatStackTrace(frames: StackFrame[] | null | undefined): string[] {
       out.push(`   ${untrusted(code, 200)}`);
     }
   }
+  const framesNote = omitted(all.length, CAPS.stackFrames, 'frame(s)');
+  if (framesNote !== undefined) out.push(framesNote);
   return out;
 }
 
@@ -527,7 +565,7 @@ function formatAssetChanges(response: SimulateResponse, networkId: string): stri
 
   if (changes.length > 0) {
     out.push(`## Asset transfers (${String(changes.length)})`);
-    for (const change of changes.slice(0, 40)) {
+    for (const change of changes.slice(0, CAPS.assetChanges)) {
       const token = change.token_info;
       const symbol = untrusted(token?.symbol ?? token?.name ?? 'token', 24);
       const decimals = token?.decimals ?? 18;
@@ -540,16 +578,15 @@ function formatAssetChanges(response: SimulateResponse, networkId: string): stri
         `- ${untrusted(change.type ?? 'Transfer', 32)} ${amount} ${symbol}: ${shortAddress(change.from)} → ${shortAddress(change.to)}`
       );
     }
-    if (changes.length > 40) {
-      out.push(`… ${String(changes.length - 40)} more transfer(s) not shown.`);
-    }
+    const transfersNote = omitted(changes.length, CAPS.assetChanges, 'transfer(s)');
+    if (transfersNote !== undefined) out.push(transfersNote);
   }
 
   const moved = balances.filter((b) => String(b.original ?? '0') !== String(b.dirty ?? '0'));
   if (moved.length > 0) {
     const symbol = nativeSymbol(networkId);
     out.push(`## Native balance changes (${symbol})`);
-    for (const diff of moved.slice(0, 20)) {
+    for (const diff of moved.slice(0, CAPS.balanceChanges)) {
       let delta = '?';
       try {
         const before = BigInt(String(diff.original ?? '0'));
@@ -561,6 +598,8 @@ function formatAssetChanges(response: SimulateResponse, networkId: string): stri
       }
       out.push(`- ${shortAddress(diff.address)}: ${delta} ${symbol}`);
     }
+    const balanceNote = omitted(moved.length, CAPS.balanceChanges, 'address(es)');
+    if (balanceNote !== undefined) out.push(balanceNote);
   }
 
   return out;
@@ -571,16 +610,15 @@ function formatStateDiff(response: SimulateResponse): string[] {
   if (diffs.length === 0) return [];
 
   const out: string[] = [`## Storage state diff (${String(diffs.length)} entries)`];
-  for (const diff of diffs.slice(0, 30)) {
+  for (const diff of diffs.slice(0, CAPS.stateEntries)) {
     const name = diff.soltype?.name;
     const label = present(name) ? untrusted(name, 48) : 'slot';
     out.push(
       `- ${shortAddress(diff.address)} ${label}: ${renderSolValue(diff.original)} → ${renderSolValue(diff.dirty)}`
     );
   }
-  if (diffs.length > 30) {
-    out.push(`… ${String(diffs.length - 30)} more state entries not shown.`);
-  }
+  const stateNote = omitted(diffs.length, CAPS.stateEntries, 'state entries');
+  if (stateNote !== undefined) out.push(stateNote);
   return out;
 }
 
@@ -588,10 +626,12 @@ function formatConsoleLogs(response: SimulateResponse): string[] {
   const logs = response.transaction?.transaction_info?.console_logs ?? [];
   if (logs.length === 0) return [];
   const out: string[] = [`## console.log output (${String(logs.length)})`];
-  for (const log of logs.slice(0, 40)) {
+  for (const log of logs.slice(0, CAPS.consoleLogs)) {
     const args = renderArgs(log.decoded_input);
     out.push(`- ${args === '' ? renderSolValue(log.raw) : args}`);
   }
+  const consoleNote = omitted(logs.length, CAPS.consoleLogs, 'line(s)');
+  if (consoleNote !== undefined) out.push(consoleNote);
   return out;
 }
 
@@ -701,7 +741,10 @@ export function formatSimulation(
   if (digest.status === 'reverted' || digest.error_message !== null) {
     const failure: string[] = ['## Failure'];
     if (digest.error_message !== null) failure.push(`- Error: ${digest.error_message}`);
-    if (digest.revert_reason !== null) failure.push(`- Revert reason: ${digest.revert_reason}`);
+    // In practice these are usually the same string; printing it twice is pure cost.
+    if (digest.revert_reason !== null && digest.revert_reason !== digest.error_message) {
+      failure.push(`- Revert reason: ${digest.revert_reason}`);
+    }
     const failingFrame = findFailingCall(info?.call_trace ?? null);
     if (failingFrame !== null) {
       failure.push(

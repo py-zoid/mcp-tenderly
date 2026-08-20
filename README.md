@@ -150,7 +150,6 @@ typical response affordable:
 | Argument                | Default | Notes                                            |
 | ----------------------- | ------- | ------------------------------------------------ |
 | `include_call_trace`    | `true`  | The main debugging artefact.                     |
-| `include_asset_changes` | `true`  | Token transfers and native balance deltas.       |
 | `include_state_diff`    | `false` | Off by default — by far the bulkiest section.    |
 | `include_opcode_frames` | `false` | Show `SLOAD`/`SSTORE`/`LOG` frames. See below.   |
 | `max_trace_nodes`       | `200`   | Truncation is always reported in the output.     |

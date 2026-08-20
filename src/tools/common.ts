@@ -44,7 +44,7 @@ export const WeiSchema = z
 export const NetworkSchema = z
   .union([z.string(), z.number()])
   .describe(
-    'Chain to simulate on. Accepts a name ("ethereum", "base", "arbitrum", "polygon", "optimism", "sepolia", …) or a numeric chain id ("8453" or 8453).'
+    'Chain name ("ethereum", "base", "arbitrum", "polygon", "optimism", "sepolia", …) or numeric chain id.'
   );
 
 export const StateOverridesSchema = z
@@ -64,13 +64,13 @@ export const StateOverridesSchema = z
     message: 'every key must be a 0x-prefixed 20-byte address',
   })
   .describe(
-    'Override account state before execution, keyed by address. Use this to fund an account, fake a token balance, or stub a contract, without needing those conditions to hold on-chain.'
+    'Override account state before execution, keyed by address — fund an account, fake a balance, or stub a contract without it being true on-chain.'
   );
 
 export const SimulationTypeSchema = z
   .enum(['full', 'quick', 'abi'])
   .describe(
-    'Depth of the simulation. "full" returns the decoded call trace, events, state diff and source-mapped revert trace — use it for debugging. "quick" returns only the outcome and gas, and is markedly faster. "abi" decodes against the ABI without a full trace.'
+    '"full": decoded call trace, events, state diff, source-mapped revert trace. "quick": outcome and gas only, much faster. "abi": decode without a trace.'
   );
 
 /** The transaction fields shared by the single and bundle tools. */
@@ -80,7 +80,7 @@ export const TransactionFieldsSchema = {
     'Target address. Omit for a contract deployment, in which case `data` is the init code.'
   ),
   data: HexDataSchema.optional().describe(
-    'Hex calldata — the ABI-encoded function selector and arguments. Omit for a plain native transfer.'
+    'Hex calldata (selector + ABI-encoded args). Omit for a plain native transfer.'
   ),
   value: WeiSchema.optional().describe('Native value to send, in wei. Defaults to 0.'),
   gas: z
@@ -98,24 +98,18 @@ export const OutputControlSchema = {
   include_call_trace: z
     .boolean()
     .optional()
-    .describe('Render the decoded call tree. Default true — it is the main debugging artefact.'),
+    .describe('Render the decoded call tree. Default true.'),
   include_state_diff: z
     .boolean()
     .optional()
-    .describe(
-      'Render the storage state diff. Default false because it is the bulkiest section by far; enable it when a storage write is what you are chasing.'
-    ),
-  include_asset_changes: z
-    .boolean()
-    .optional()
-    .describe('Render token transfers and native balance deltas. Default true.'),
+    .describe('Render the storage state diff. Default false — the bulkiest section.'),
   max_trace_nodes: z
     .number()
     .int()
     .positive()
     .max(5000)
     .optional()
-    .describe('Cap on rendered call-trace frames. Default 200. Truncation is always reported.'),
+    .describe('Cap on rendered call-trace frames. Default 200.'),
   max_trace_depth: z
     .number()
     .int()
@@ -127,21 +121,18 @@ export const OutputControlSchema = {
     .boolean()
     .optional()
     .describe(
-      'Show SLOAD, SSTORE and LOG frames in the call trace. Default false — a full trace interleaves hundreds of these with the actual calls, and they push the frames that explain a revert out of the output.'
+      'Show SLOAD/SSTORE/LOG frames in the call trace. Default false — they crowd out the calls that explain a revert.'
     ),
   include_raw_response: z
     .boolean()
     .optional()
-    .describe(
-      'Append the untouched Tenderly JSON. Very large — reach for it only when the formatted digest is missing something you need.'
-    ),
+    .describe('Append the raw Tenderly JSON. Very large.'),
 };
 
 /** Shape of the output-control arguments after parsing. */
 export interface OutputControlArgs {
   include_call_trace?: boolean | undefined;
   include_state_diff?: boolean | undefined;
-  include_asset_changes?: boolean | undefined;
   max_trace_nodes?: number | undefined;
   max_trace_depth?: number | undefined;
   include_opcode_frames?: boolean | undefined;
@@ -151,7 +142,6 @@ export interface OutputControlArgs {
 export function toFormatOptions(args: OutputControlArgs): {
   includeCallTrace?: boolean | undefined;
   includeStateDiff?: boolean | undefined;
-  includeAssetChanges?: boolean | undefined;
   maxTraceNodes?: number | undefined;
   maxTraceDepth?: number | undefined;
   includeOpcodeFrames?: boolean | undefined;
@@ -159,7 +149,6 @@ export function toFormatOptions(args: OutputControlArgs): {
   return {
     includeCallTrace: args.include_call_trace,
     includeStateDiff: args.include_state_diff,
-    includeAssetChanges: args.include_asset_changes,
     maxTraceNodes: args.max_trace_nodes,
     maxTraceDepth: args.max_trace_depth,
     includeOpcodeFrames: args.include_opcode_frames,
@@ -209,7 +198,7 @@ export function errorResult(text: string): CallToolResult {
 }
 
 /** Appends the raw payload, guarded so a huge body cannot be pasted unbounded. */
-const RAW_LIMIT = 200_000;
+const RAW_LIMIT = 40_000;
 
 export function appendRaw(text: string, raw: unknown): string {
   let json: string;

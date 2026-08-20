@@ -35,10 +35,8 @@ export function buildServer(options: BuildServerOptions): BuiltServer {
     { name: SERVER_NAME, version: SERVER_VERSION },
     {
       instructions:
-        'Tenderly transaction simulation and trace debugging for EVM chains. ' +
-        'Simulate a transaction before sending it to learn whether it reverts and why, or fetch a saved simulation to inspect its call trace. ' +
-        'Simulations run against real forked chain state at the latest block by default and never broadcast anything, so they are safe to run freely. ' +
-        'When a simulation reverts, the revert reason and the failing call frame are reported first; ask for include_state_diff when a storage write is what matters.',
+        'Tenderly transaction simulation and trace debugging for EVM chains. Simulations run against real forked state at the latest block and never broadcast, so they are safe to run freely. ' +
+        'On a revert, the reason and failing frame are reported first; ask for include_state_diff when a storage write is what matters.',
     }
   );
 

@@ -23,24 +23,15 @@ export function registerGetSimulation(options: {
     {
       title: 'Inspect a saved simulation, with its trace',
       description:
-        'Look up a saved Tenderly simulation by id and render its outcome and full call trace. ' +
-        'Use this to re-examine a simulation you already ran — to go deeper on a trace that was truncated, to pull the state diff that is omitted by default, or to inspect one created earlier or from the Tenderly dashboard. ' +
-        "Note that Tenderly's saved-simulation record stores only metadata (inputs, gas, status, error), not the trace; the trace is therefore reproduced by replaying the recorded inputs at the recorded block, which is faithful but costs one simulation against your rate limit. " +
-        'Pass reconstruct_trace=false for a cheap metadata-only lookup. ' +
-        'The id is the UUID reported as "Simulation ID" by the simulate tools, and the one in a dashboard simulator URL.',
+        'Look up a saved simulation by id (the UUID reported by the simulate tools, also in dashboard simulator URLs) and render its outcome and call trace. ' +
+        'The saved record stores metadata only, so the trace is rebuilt by replaying the recorded inputs at the recorded block — faithful, but costs one simulation against the rate limit. ' +
+        'Pass reconstruct_trace=false for a metadata-only lookup that makes no simulation call.',
       inputSchema: {
-        simulation_id: z
-          .string()
-          .min(1)
-          .describe(
-            'Simulation UUID, as returned by the simulate tools or seen in a dashboard URL.'
-          ),
+        simulation_id: z.string().min(1).describe('Simulation UUID.'),
         reconstruct_trace: z
           .boolean()
           .optional()
-          .describe(
-            'Replay the recorded inputs to obtain the call trace, events and state diff. Default true. Set false for a metadata-only lookup that makes no simulation call.'
-          ),
+          .describe('Replay to obtain the call trace, events and state diff. Default true.'),
         ...OutputControlSchema,
       },
       annotations: { readOnlyHint: true, openWorldHint: true },
@@ -55,11 +46,13 @@ export function registerGetSimulation(options: {
         const meta = saved.simulation;
 
         let response: SimulateResponse = saved;
+        let rawReplay: SimulateResponse | null = null;
         const notes: string[] = [];
 
         if (wantTrace && meta !== null && meta !== undefined) {
           try {
             const replay = await client.replaySimulation(meta);
+            rawReplay = replay;
             // Keep the *original* metadata for identity, so the reported id and
             // dashboard link still point at the saved simulation rather than at
             // the throwaway replay.
@@ -70,9 +63,7 @@ export function registerGetSimulation(options: {
               generated_access_list: replay.generated_access_list ?? null,
             };
             notes.push(
-              'The trace shown was reproduced by re-running the recorded inputs at block ' +
-                `${String(meta.block_number ?? 'unknown')}, because Tenderly's saved-simulation record stores metadata only. ` +
-                'The replay was not saved and does not consume stored-simulation quota.'
+              `Trace reproduced by replaying at block ${String(meta.block_number ?? 'unknown')}; the saved record stores metadata only. Not saved, so no quota consumed.`
             );
           } catch (err) {
             // A replay failure must not lose the metadata we already have.
@@ -83,7 +74,7 @@ export function registerGetSimulation(options: {
           }
         } else if (!wantTrace) {
           notes.push(
-            'Metadata only, as requested. Tenderly does not store the call trace with a saved simulation; pass reconstruct_trace=true to reproduce it.'
+            'Metadata only, as requested. The saved record has no trace; reconstruct_trace=true rebuilds it.'
           );
         }
 
@@ -95,7 +86,7 @@ export function registerGetSimulation(options: {
         );
         if (notes.length > 0) text += `\n\n## Notes\n${notes.map((n) => `- ${n}`).join('\n')}`;
         if (args.include_raw_response === true)
-          text = appendRaw(text, { saved, rendered: response });
+          text = appendRaw(text, { saved, replay: rawReplay });
 
         return { ...textResult(text), structuredContent: { ...buildDigest(response, config) } };
       })

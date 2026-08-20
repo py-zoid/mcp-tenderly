@@ -1,8 +1,15 @@
 {
+  // The published artefact is an executable, not a library. Nobody imports its
+  // types, and shipping source maps without the sources they reference just
+  // inflates the tarball — zod's inferred .d.ts for the response schemas alone
+  // was 61 kB. Type checking still runs over the full project via tsconfig.json.
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    "declaration": false,
+    "declarationMap": false,
+    "sourceMap": false
   },
   "include": ["src/**/*.ts"]
 }

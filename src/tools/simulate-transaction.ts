@@ -33,10 +33,9 @@ export function registerSimulateTransaction(options: {
     {
       title: 'Simulate an EVM transaction',
       description:
-        'Simulate a single transaction against real forked chain state using Tenderly, without broadcasting it. ' +
-        'Returns whether it would succeed or revert, gas used, the revert reason with a source-mapped stack trace where the contract is verified, decoded events, token transfers, and the full decoded call trace. ' +
-        'Use this to answer "would this transaction work" and "why did it fail" before spending gas. ' +
-        'Simulation runs at the latest block unless block_number is given, so it reflects current on-chain state.',
+        'Simulate one transaction against real forked chain state, without broadcasting it. ' +
+        'Answers "would this work" and "why did it fail": outcome, gas, revert reason with a source-mapped stack trace for verified contracts, decoded events and the call trace. ' +
+        'Runs at the latest block unless block_number is given, so it reflects current state.',
       inputSchema: {
         network: NetworkSchema,
         ...TransactionFieldsSchema,
@@ -52,7 +51,7 @@ export function registerSimulateTransaction(options: {
           .boolean()
           .optional()
           .describe(
-            'Persist the simulation to the Tenderly dashboard and return a shareable URL. Consumes free-tier stored-simulation quota. Defaults to the server TENDERLY_SAVE_SIMULATIONS setting (true unless configured otherwise).'
+            'Persist to the Tenderly dashboard and return a shareable URL. Consumes free-tier stored-simulation quota. Defaults to the server setting (true).'
           ),
         ...OutputControlSchema,
       },
