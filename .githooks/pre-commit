@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+#
+# Formats and lints only the files being committed, so a commit is never
+# polluted with reformatting of code it did not touch.
+set -euo pipefail
+
+staged=$(git diff --cached --name-only --diff-filter=ACMR)
+[ -z "$staged" ] && exit 0
+
+# Prettier understands more than it lints; --ignore-unknown skips the rest.
+formattable=$(echo "$staged" | grep -E '\.(ts|js|json|md|yml|yaml)$' || true)
+if [ -n "$formattable" ]; then
+  echo "$formattable" | xargs npx prettier --write --ignore-unknown
+  # Re-stage what formatting changed, so the commit matches what was checked.
+  echo "$formattable" | xargs git add
+fi
+
+lintable=$(echo "$staged" | grep -E '\.ts$' || true)
+if [ -n "$lintable" ]; then
+  echo "$lintable" | xargs npx eslint --max-warnings 0
+fi
