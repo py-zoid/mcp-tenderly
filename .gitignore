@@ -1,0 +1,15 @@
+node_modules/
+dist/
+coverage/
+
+# Credentials — never commit. See .env.example for the expected shape.
+.env
+.env.*
+!.env.example
+
+*.log
+npm-debug.log*
+.DS_Store
+.idea/
+.vscode/
+*.tsbuildinfo
