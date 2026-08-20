@@ -191,6 +191,38 @@ Two things to know about quota:
 | `TENDERLY_TIMEOUT_MS`       | `30000`                   | Per-request timeout.                  |
 | `TENDERLY_BASE_URL`         | `https://api.tenderly.co` | Override for testing against a stub.  |
 
+## Security and trust model
+
+**Simulations never broadcast.** Every call is read-only against a Tenderly
+fork. No transaction is signed or sent, and the server holds no keys beyond your
+Tenderly access token.
+
+**One outbound host.** The server talks only to `api.tenderly.co`. Nothing else
+is contacted, and no telemetry is collected.
+
+**Your access token stays out of output.** It is sent only as the `X-Access-Key`
+header, is never logged at any log level, and is excluded from error messages
+and paths. A test asserts it is absent from both stdout and stderr.
+
+**Simulation output is treated as untrusted input.** This is the one worth
+understanding, because it is easy to miss. Contract names, token symbols,
+function names, decoded strings, verified source lines and revert reasons are
+all controlled by whoever deployed the contract — and the point of this server
+is pointing it at contracts you do _not_ yet trust. A contract can `revert()`
+with any string it likes, which lands in the most prominent position in the
+output.
+
+So all such text is passed through a sanitiser before rendering: whitespace is
+collapsed to a single line, zero-width and bidi-override characters are removed,
+and length is capped with the truncation stated. That prevents hostile chain
+data from forging a markdown heading, a list item, or anything else that could
+read to a model as instructions rather than as data. It is a structural defence,
+not an attempt to detect malicious intent — untrusted text simply cannot escape
+the field it belongs to. Ordinary revert strings are unaffected.
+
+This does not make a hostile contract's output _true_, only inert. Treat a
+simulation result as a report about untrusted code, which is what it is.
+
 ## Troubleshooting
 
 **The server exits immediately with a config message.** That is by design — it

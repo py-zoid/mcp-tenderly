@@ -116,6 +116,61 @@ function toBigInt(value: string | number | null | undefined): bigint | undefined
   }
 }
 
+/**
+ * Neutralises a string that originated from chain data before it is rendered
+ * into model context.
+ *
+ * This is a security boundary, not cosmetics. Every contract name, token
+ * symbol, function name, decoded string, source line and revert reason in a
+ * simulation is controlled by whoever deployed the contract — and the entire
+ * point of this server is pointing it at contracts the user does not trust yet.
+ * A contract can `revert()` with any string it likes, so an attacker can put
+ * arbitrary text into the most prominent position in the output: the revert
+ * reason at the top of the failure section.
+ *
+ * The defence is structural rather than semantic. Trying to *detect* injection
+ * is whack-a-mole; instead untrusted text is made unable to escape the single
+ * line and field it belongs to. Collapsing all whitespace removes the newlines
+ * needed to forge a `##` heading or a list item, stripping bidi and zero-width
+ * characters removes the trojan-source trick of hiding content from a human
+ * reviewer, and the length cap stops a multi-kilobyte revert string flooding
+ * the context.
+ */
+/**
+ * Drops characters that let text hide or misrepresent itself: C0/C1 controls,
+ * zero-width joiners and spaces, and the bidi overrides behind trojan-source
+ * style attacks. Controls become spaces so the caller's whitespace collapsing
+ * folds them away uniformly.
+ *
+ * Written as a code-point scan rather than a regex because the interesting
+ * characters are exactly the ones a regex literal cannot hold legibly.
+ */
+function stripInvisible(value: string): string {
+  let out = '';
+  for (const ch of value) {
+    const cp = ch.codePointAt(0);
+    if (cp === undefined) continue;
+    if (cp < 0x20 || cp === 0x7f || (cp >= 0x80 && cp <= 0x9f)) {
+      out += ' ';
+      continue;
+    }
+    const zeroWidth = cp >= 0x200b && cp <= 0x200f;
+    const bidiOverride = cp >= 0x202a && cp <= 0x202e;
+    const invisibleMath = cp >= 0x2060 && cp <= 0x2064;
+    const bidiIsolate = cp >= 0x2066 && cp <= 0x2069;
+    if (zeroWidth || bidiOverride || invisibleMath || bidiIsolate || cp === 0xfeff) continue;
+    out += ch;
+  }
+  return out;
+}
+
+function untrusted(value: string, maxLength = 200): string {
+  const flattened = stripInvisible(value).replace(/\s+/g, ' ').trim();
+  if (flattened === '') return '';
+  if (flattened.length <= maxLength) return flattened;
+  return `${flattened.slice(0, maxLength)}… (truncated from ${String(flattened.length)} chars)`;
+}
+
 /** First argument that is a non-empty string, else null. */
 function firstPresent(...values: (string | null | undefined)[]): string | null {
   for (const value of values) {
@@ -200,7 +255,10 @@ export function renderSolValue(value: unknown, depth = 0): string {
     // often compared by eye, so it gets the compact form rather than the
     // byte-count note that suits an opaque blob.
     if (/^0x[0-9a-fA-F]{40}$/.test(value)) return shortAddress(value);
-    return value.startsWith('0x') && value.length > 24 ? shortHex(value) : value;
+    if (value.startsWith('0x') && value.length > 24) return shortHex(value);
+    // A decoded string is contract-controlled: a token's name() can return
+    // anything at all, including a forged instruction block.
+    return untrusted(value, 120);
   }
   if (typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint') {
     return String(value);
@@ -225,7 +283,7 @@ function renderArgs(args: SolValue[] | null | undefined): string {
   return args
     .map((arg, index) => {
       const name = arg.soltype?.name;
-      const label = name !== undefined && name !== '' ? name : `arg${String(index)}`;
+      const label = name !== undefined && name !== '' ? untrusted(name, 48) : `arg${String(index)}`;
       return `${label}=${renderSolValue(arg.value)}`;
     })
     .join(', ');
@@ -243,8 +301,8 @@ function buildContractLabels(
     const name = contract.contract_name;
     const label = present(name)
       ? present(symbol) && symbol !== name
-        ? `${name} (${symbol})`
-        : name
+        ? `${untrusted(name, 48)} (${untrusted(symbol, 24)})`
+        : untrusted(name, 48)
       : undefined;
     if (label !== undefined) labels.set(address.toLowerCase(), label);
   }
@@ -351,7 +409,7 @@ export function formatCallTrace(
     const args = renderArgs(node.decoded_input);
 
     const callee = present(fn)
-      ? `${target}.${fn}(${args})`
+      ? `${target}.${untrusted(fn, 64)}(${args})`
       : // Unverified contract: the selector is all we have, and it is still
         // enough for a human to look up in 4byte.directory.
         present(node.input) && node.input.length >= 10
@@ -365,7 +423,9 @@ export function formatCallTrace(
 
     const failed = present(node.error);
     const marker = failed ? '✗ ' : '';
-    const suffix = failed ? ` — ${node.error_reason ?? node.error ?? 'reverted'}` : '';
+    const suffix = failed
+      ? ` — ${untrusted(node.error_reason ?? node.error ?? 'reverted', 160)}`
+      : '';
     const meta = bits.length > 0 ? ` · ${bits.join(' · ')}` : '';
 
     lines.push(`${prefix}${connector}${marker}${op} ${callee}${meta}${suffix}`);
@@ -419,7 +479,9 @@ function formatLogs(
     const name = log.name;
     const emitter = labelFor(log.raw?.address, labels);
     if (present(name)) {
-      out.push(`${String(index + 1)}. ${name}(${renderArgs(log.inputs)}) — from ${emitter}`);
+      out.push(
+        `${String(index + 1)}. ${untrusted(name, 64)}(${renderArgs(log.inputs)}) — from ${emitter}`
+      );
     } else {
       // Unverified emitter: topic0 is the event signature hash, which is still
       // resolvable by hand, so it beats reporting nothing.
@@ -441,17 +503,17 @@ function formatStackTrace(frames: StackFrame[] | null | undefined): string[] {
 
   const out: string[] = ['## Source-mapped revert trace'];
   for (const [index, frame] of all.slice(0, 20).entries()) {
-    const where = present(frame.name) ? frame.name : (frame.contract ?? 'unknown');
+    const where = untrusted(present(frame.name) ? frame.name : (frame.contract ?? 'unknown'), 64);
     const line = frame.line !== null && frame.line !== undefined ? `:${String(frame.line)}` : '';
     const code = frame.code;
     const reason = frame.error_reason ?? frame.error;
     out.push(
       `${String(index + 1)}. ${where}${line}` +
         (present(frame.op) ? ` [${frame.op}]` : '') +
-        (present(reason) ? ` — ${reason}` : '')
+        (present(reason) ? ` — ${untrusted(reason, 160)}` : '')
     );
     if (present(code) && code.trim() !== '') {
-      out.push(`   ${code.trim()}`);
+      out.push(`   ${untrusted(code, 200)}`);
     }
   }
   return out;
@@ -467,7 +529,7 @@ function formatAssetChanges(response: SimulateResponse, networkId: string): stri
     out.push(`## Asset transfers (${String(changes.length)})`);
     for (const change of changes.slice(0, 40)) {
       const token = change.token_info;
-      const symbol = token?.symbol ?? token?.name ?? 'token';
+      const symbol = untrusted(token?.symbol ?? token?.name ?? 'token', 24);
       const decimals = token?.decimals ?? 18;
       const raw = change.raw_amount ?? change.amount;
       const amount =
@@ -475,7 +537,7 @@ function formatAssetChanges(response: SimulateResponse, networkId: string): stri
           ? formatUnits(change.raw_amount, decimals)
           : String(raw ?? '?');
       out.push(
-        `- ${change.type ?? 'Transfer'} ${amount} ${symbol}: ${shortAddress(change.from)} → ${shortAddress(change.to)}`
+        `- ${untrusted(change.type ?? 'Transfer', 32)} ${amount} ${symbol}: ${shortAddress(change.from)} → ${shortAddress(change.to)}`
       );
     }
     if (changes.length > 40) {
@@ -511,7 +573,7 @@ function formatStateDiff(response: SimulateResponse): string[] {
   const out: string[] = [`## Storage state diff (${String(diffs.length)} entries)`];
   for (const diff of diffs.slice(0, 30)) {
     const name = diff.soltype?.name;
-    const label = present(name) ? name : 'slot';
+    const label = present(name) ? untrusted(name, 48) : 'slot';
     out.push(
       `- ${shortAddress(diff.address)} ${label}: ${renderSolValue(diff.original)} → ${renderSolValue(diff.dirty)}`
     );
@@ -552,6 +614,13 @@ export interface SimulationDigest {
   dashboard_url: string | null;
 }
 
+/** `untrusted`, preserving null for a field that carries no value. */
+function sanitiseOrNull(value: string | null | undefined, maxLength: number): string | null {
+  if (!present(value)) return null;
+  const clean = untrusted(value, maxLength);
+  return clean === '' ? null : clean;
+}
+
 export function buildDigest(response: SimulateResponse, config: Config): SimulationDigest {
   const tx = response.transaction;
   const sim = response.simulation;
@@ -574,9 +643,9 @@ export function buildDigest(response: SimulateResponse, config: Config): Simulat
     block_number: tx?.block_number ?? sim?.block_number ?? null,
     gas_used: num(tx?.gas_used ?? sim?.gas_used ?? info?.gas_used) ?? null,
     gas_limit: realGasLimit(tx?.gas ?? sim?.gas) ?? null,
-    method: firstPresent(tx?.method, sim?.method, info?.method),
-    error_message: errorMessage === '' ? null : errorMessage,
-    revert_reason: revertReason,
+    method: sanitiseOrNull(firstPresent(tx?.method, sim?.method, info?.method), 64),
+    error_message: sanitiseOrNull(errorMessage, 240),
+    revert_reason: sanitiseOrNull(revertReason, 240),
     event_count: (info?.logs ?? []).length,
     dashboard_url: simulationId !== null ? simulationUrl(config, simulationId) : null,
   };
@@ -636,7 +705,7 @@ export function formatSimulation(
     const failingFrame = findFailingCall(info?.call_trace ?? null);
     if (failingFrame !== null) {
       failure.push(
-        `- Failing call: ${labelFor(failingFrame.to, labels)}.${failingFrame.function_name ?? '<unknown>'} — ${failingFrame.error_reason ?? failingFrame.error ?? 'reverted'}`
+        `- Failing call: ${labelFor(failingFrame.to, labels)}.${untrusted(failingFrame.function_name ?? '<unknown>', 64)} — ${untrusted(failingFrame.error_reason ?? failingFrame.error ?? 'reverted', 160)}`
       );
     }
     if (digest.error_message === null && digest.revert_reason === null) {
